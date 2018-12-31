@@ -1,0 +1,53 @@
+projectName "jusmsgpack"
+
+artifact directory "src" "src"
+artifact directory "bin" { "bin" mkdir }
+
+artifact pipeline {
+	key "classes"
+	scandir {
+		"src"
+		files
+		wildcard "*.java"
+		not wildcard "package-info.java"
+	}
+	regex {
+		"\\.java$" ".class"
+		rebaseFrom "src"
+		rebaseTo "bin"
+		exec "compile" {
+			"javac"
+				"-cp" aux "bin"
+				"-d" aux "bin"
+				"-sourcepath" aux "src"
+				source
+			loud
+		}
+	}
+}
+
+artifact split "genClasses" {
+	"classes"
+	tree "actualClasses" {
+		"bin"
+		files
+		wildcard "*.class"
+	}
+}
+
+artifact file "jar" {
+	"dist/org.unclesniper.msgpack.jar"
+	zip {
+		piece {
+			from "bin"
+			"genClasses"
+		}
+	}
+}
+
+goal build require "jar"
+
+goal clean {
+	delete "bin"
+	delete "dist"
+}
