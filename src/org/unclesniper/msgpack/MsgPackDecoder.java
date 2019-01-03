@@ -24,7 +24,9 @@ public class MsgPackDecoder {
 	private enum State {
 		CLEAN,
 		INT,
-		UINT
+		UINT,
+		FLOAT,
+		DOUBLE
 	}
 
 	private final Deque<Level> stack = new LinkedList<Level>();
@@ -125,11 +127,15 @@ public class MsgPackDecoder {
 									break;
 								case 0xCA:
 									// float 32
-									//TODO
+									accumulator = 0l;
+									remainingLength = 4l;
+									state = State.FLOAT;
 									break;
 								case 0xCB:
 									// float 64
-									//TODO
+									accumulator = 0l;
+									remainingLength = 8l;
+									state = State.DOUBLE;
 									break;
 								case 0xCC:
 									// uint 8
@@ -254,6 +260,20 @@ public class MsgPackDecoder {
 					if(--remainingLength == 0l) {
 						state = State.CLEAN;
 						sink.integer(accumulator, false);
+					}
+					break;
+				case FLOAT:
+					accumulator = (accumulator << 8) | ((long)b & 0xFFl);
+					if(--remainingLength == 0l) {
+						state = State.CLEAN;
+						sink.fraction(Float.intBitsToFloat((int)accumulator));
+					}
+					break;
+				case DOUBLE:
+					accumulator = (accumulator << 8) | ((long)b & 0xFFl);
+					if(--remainingLength == 0l) {
+						state = State.CLEAN;
+						sink.fraction(Double.longBitsToDouble(accumulator));
 					}
 					break;
 				default:

@@ -10,4 +10,6 @@ public interface MsgPackSink {
 
 	void integer(long value, boolean signed) throws IOException;
 
+	void fraction(double value) throws IOException;
+
 }

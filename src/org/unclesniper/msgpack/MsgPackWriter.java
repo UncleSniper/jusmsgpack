@@ -5,6 +5,6 @@ import java.io.IOException;
 
 public interface MsgPackWriter {
 
-	void writeChunk(ByteBuffer buffer) throws IOException;
+	void writeChunk(byte[] buffer, int offset, int length) throws IOException;
 
 }
