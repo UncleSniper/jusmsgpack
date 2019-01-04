@@ -226,7 +226,9 @@ public class UTF8Encoder {
 					outcount += count;
 			}
 			else if(pending > 0) {
-				output[outoff + outcount++] = (byte)((partial & 0x3F) | 0x80);
+				if(output != null)
+					output[outoff + outcount] = (byte)((partial & 0x3F) | 0x80);
+				++outcount;
 				partial >>>= 6;
 				--pending;
 			}
@@ -312,22 +314,31 @@ public class UTF8Encoder {
 				}
 				if(c < 0)
 					continue;
-				if(c < 0x80)
-					output[outoff + outcount++] = (byte)c;
+				if(c < 0x80) {
+					if(output != null)
+						output[outoff + outcount] = (byte)c;
+					++outcount;
+				}
 				else if(c < 0x800) {
 					partial = c & 0x3F;
 					pending = 1;
-					output[outoff + outcount++] = (byte)((c >> 6) | 0xC0);
+					if(output != null)
+						output[outoff + outcount] = (byte)((c >> 6) | 0xC0);
+					++outcount;
 				}
 				else if(c < 0x00010000) {
 					partial = c & 0x0FFF;
 					pending = 2;
-					output[outoff + outcount++] = (byte)((c >> 12) | 0xE0);
+					if(output != null)
+						output[outoff + outcount] = (byte)((c >> 12) | 0xE0);
+					++outcount;
 				}
 				else {
 					partial = c & 0x0003FFFF;
 					pending = 3;
-					output[outoff + outcount++] = (byte)((c >> 18) | 0xFC);
+					if(output != null)
+						output[outoff + outcount] = (byte)((c >> 18) | 0xFC);
+					++outcount;
 				}
 			}
 		}

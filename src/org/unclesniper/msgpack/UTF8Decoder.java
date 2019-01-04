@@ -221,9 +221,11 @@ public class UTF8Decoder {
 			throws StringEncodingException {
 		outcount = 0;
 		int consumed = 0;
-		while((replacement != null || consumed < insize) && outcount < outsize) {
+		while((replacement != null || consumed < insize) && (output == null || outcount < outsize)) {
 			if(lowSurrogate != 0) {
-				output[outoff + outcount++] = (char)lowSurrogate;
+				if(output != null)
+					output[outoff + outcount] = (char)lowSurrogate;
+				++outcount;
 				lowSurrogate = 0;
 				continue;
 			}
@@ -246,8 +248,11 @@ public class UTF8Decoder {
 				skipContinuationBytes = false;
 			}
 			if(pending == 0) {
-				if((c & 0x80) == 0)
-					output[outoff + outcount++] = (char)(c & 0x7F);
+				if((c & 0x80) == 0) {
+					if(output != null)
+						output[outoff + outcount] = (char)(c & 0x7F);
+					++outcount;
+				}
 				else if((c & 0xE0) == 0xC0) {
 					partial = c & 0x1F;
 					partialSize = 1;
@@ -293,11 +298,16 @@ public class UTF8Decoder {
 						continue;
 					if(partial > 0xFFFF) {
 						partial -= 0x10000;
-						output[outoff + outcount++] = (char)((partial >> 10) | 0xD800);
+						if(output != null)
+							output[outoff + outcount] = (char)((partial >> 10) | 0xD800);
+						++outcount;
 						lowSurrogate = (partial & 0x03FF) | 0xDC00;
 					}
-					else
-						output[outoff + outcount++] = (char)partial;
+					else {
+						if(output != null)
+							output[outoff + outcount] = (char)partial;
+						++outcount;
+					}
 				}
 			}
 		}
