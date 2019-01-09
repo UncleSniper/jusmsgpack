@@ -164,6 +164,8 @@ public class UTF8Encoder {
 
 		int drain(byte[] output, int outoff, int outsize);
 
+		ReplacementOutput copy();
+
 	}
 
 	public enum SkipLowSurrogate {
@@ -208,6 +210,19 @@ public class UTF8Encoder {
 		pending = highSurrogate = 0;
 		replacement = null;
 		skipLowSurrogate = null;
+	}
+
+	public boolean isClean() {
+		return replacement == null && pending == 0;
+	}
+
+	public void copyStateInto(UTF8Encoder other) {
+		other.pending = pending;
+		other.partial = partial;
+		other.highSurrogate = highSurrogate;
+		other.errorHandler = errorHandler;
+		other.replacement = replacement == null ? null : replacement.copy();
+		other.skipLowSurrogate = skipLowSurrogate;
 	}
 
 	public int encode(char[] input, int inoff, int insize, byte[] output, int outoff, int outsize)

@@ -176,6 +176,8 @@ public class UTF8Decoder {
 
 		int drain(char[] output, int outoff, int outsize);
 
+		ReplacementOutput copy();
+
 	}
 
 	public static final ErrorHandler DEFAULT_ERROR_HANDLER = ThrowingErrorHandler.instance;
@@ -215,6 +217,17 @@ public class UTF8Decoder {
 	public void reset() {
 		pending = 0;
 		replacement = null;
+		lowSurrogate = 0;
+		skipContinuationBytes = false;
+	}
+
+	public boolean isClean() {
+		//TODO
+		return false;
+	}
+
+	public void copyStateInto(UTF8Decoder other) {
+		//TODO
 	}
 
 	public int decode(byte[] input, int inoff, int insize, char[] output, int outoff, int outsize)

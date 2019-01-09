@@ -1,8 +1,6 @@
 package org.unclesniper.msgpack;
 
-import java.util.Deque;
 import java.io.IOException;
-import java.util.LinkedList;
 
 public class MsgPackDecoder {
 
@@ -13,10 +11,16 @@ public class MsgPackDecoder {
 
 	private static class Level {
 
+		final Level parent;
+
 		final Structure structure;
 
-		Level(Structure structure) {
+		long remainingLength;
+
+		Level(Level parent, Structure structure, long remainingLength) {
+			this.parent = parent;
 			this.structure = structure;
+			this.remainingLength = remainingLength;
 		}
 
 	}
@@ -26,14 +30,18 @@ public class MsgPackDecoder {
 		INT,
 		UINT,
 		FLOAT,
-		DOUBLE
+		DOUBLE,
+		STRING,
+		STRING_LENGTH,
+		BINARY,
+		BINARY_LENGTH,
+		ARRAY_LENGTH,
+		MAP_LENGTH
 	}
 
-	private final Deque<Level> stack = new LinkedList<Level>();
+	private Level stack;
 
-	private Level topLevel;
-
-	private MsgPackSink sink;
+	private MsgPackByteSink sink;
 
 	private State state = State.CLEAN;
 
@@ -43,41 +51,138 @@ public class MsgPackDecoder {
 
 	private boolean nextByteIsSign;
 
-	public MsgPackDecoder(MsgPackSink sink) {
+	private boolean needsPushDown;
+
+	public MsgPackDecoder(MsgPackByteSink sink) {
 		this.sink = sink;
 	}
 
-	public MsgPackSink getSink() {
+	public MsgPackByteSink getSink() {
 		return sink;
 	}
 
-	public void setSink(MsgPackSink sink) {
+	public void setSink(MsgPackByteSink sink) {
 		this.sink = sink;
 	}
 
-	public void pushBytes(byte[] bytes) throws IOException {
-		pushBytes(bytes, 0, bytes.length);
+	public int pushBytes(byte[] bytes) throws IOException {
+		return pushBytes(bytes, 0, bytes.length);
 	}
 
-	public void pushBytes(byte[] bytes, int offset, int length) throws IOException {
+	private boolean enterString(long length) throws IOException {
+		if(length == 0l) {
+			sink.emptyString();
+			return false;
+		}
+		remainingLength = length;
+		state = State.STRING;
+		sink.beginString((int)length);
+		return true;
+	}
+
+	private boolean enterBinary(long length) throws IOException {
+		if(length == 0l) {
+			sink.emptyBinary();
+			return false;
+		}
+		remainingLength = length;
+		state = State.BINARY;
+		sink.beginBinary((int)length);
+		return true;
+	}
+
+	private boolean enterArray(long size) throws IOException {
+		state = State.CLEAN;
+		if(size == 0l) {
+			sink.emptyArray();
+			return false;
+		}
+		stack = new Level(stack, Structure.ARRAY, size);
+		sink.beginArray((int)size);
+		return true;
+	}
+
+	private boolean enterMap(long pairCount) throws IOException {
+		state = State.CLEAN;
+		if(pairCount == 0l) {
+			sink.emptyMap();
+			return false;
+		}
+		stack = new Level(stack, Structure.MAP, pairCount * 2l);
+		sink.beginMap((int)pairCount);
+		return true;
+	}
+
+	private boolean pushDown(boolean nonBlocking, boolean issued) throws IOException {
+		while(stack != null) {
+			if(stack.remainingLength > 1l) {
+				--stack.remainingLength;
+				return nonBlocking;
+			}
+			if(issued && nonBlocking) {
+				needsPushDown = true;
+				return true;
+			}
+			switch(stack.structure) {
+				case ARRAY:
+					stack = stack.parent;
+					sink.endArray();
+					break;
+				case MAP:
+					stack = stack.parent;
+					sink.endMap();
+					break;
+				default:
+					throw new Doom("Unrecognized structure: " + stack.structure.name());
+			}
+			if(nonBlocking) {
+				needsPushDown = stack != null;
+				return true;
+			}
+		}
+		return nonBlocking;
+	}
+
+	public int pushBytes(byte[] bytes, int offset, int length) throws IOException {
+		boolean nonBlocking = !sink.isBlockingSink();
+		if(needsPushDown) {
+			needsPushDown = false;
+			if(pushDown(nonBlocking, false))
+				return 0;
+		}
+		int chunk, written;
 		int end = offset + length;
-		for(; offset < end; ++offset) {
-			byte b = bytes[offset];
+		int i = offset;
+	  perByte:
+		for(; i < end; ++i) {
+			byte b = bytes[i];
 			switch(state) {
 				case CLEAN:
 					if(b >= 0) {
 						// positive fixint
 						sink.integer((long)b, true);
+						if(pushDown(nonBlocking, true))
+							break perByte;
 						break;
 					}
 					switch(b & 0xE0) {
 						case 0x80:
 							// 100xxxxx => fixmap, fixarray
-							//TODO
+							if((b & 0x10) == 0) {
+								// fixmap
+								enterMap((long)(b & 0xF));
+							}
+							else {
+								// fixarray
+								enterArray((long)(b & 0xF));
+							}
+							if(nonBlocking)
+								break perByte;
 							break;
 						case 0xA0:
 							// 101xxxxx => fixstr
-							//TODO
+							if(enterString((long)(b & 0x1F)) ? nonBlocking : pushDown(nonBlocking, true))
+								break perByte;
 							break;
 						case 0xC0:
 							// 110xxxxx => nil, false, true, bin 8, bin 16, bin 32, ext 8, ext 16, ext 32,
@@ -89,6 +194,8 @@ public class MsgPackDecoder {
 								case 0xC0:
 									// nil
 									sink.nil();
+									if(pushDown(nonBlocking, true))
+										break perByte;
 									break;
 								case 0xC1:
 									// (never used)
@@ -96,22 +203,32 @@ public class MsgPackDecoder {
 								case 0xC2:
 									// false
 									sink.bool(false);
+									if(pushDown(nonBlocking, true))
+										break perByte;
 									break;
 								case 0xC3:
 									// true
 									sink.bool(true);
+									if(pushDown(nonBlocking, true))
+										break perByte;
 									break;
 								case 0xC4:
 									// bin 8
-									//TODO
+									accumulator = 0l;
+									remainingLength = 1l;
+									state = State.BINARY_LENGTH;
 									break;
 								case 0xC5:
 									// bin 16
-									//TODO
+									accumulator = 0l;
+									remainingLength = 2l;
+									state = State.BINARY_LENGTH;
 									break;
 								case 0xC6:
 									// bin 32
-									//TODO
+									accumulator = 0l;
+									remainingLength = 4l;
+									state = State.BINARY_LENGTH;
 									break;
 								case 0xC7:
 									// ext 8
@@ -207,30 +324,45 @@ public class MsgPackDecoder {
 									break;
 								case 0xD9:
 									// str 8
-									//TODO
+									accumulator = 0l;
+									remainingLength = 1l;
+									state = State.STRING_LENGTH;
+									break;
 								case 0xDA:
 									// str 16
-									//TODO
+									accumulator = 0l;
+									remainingLength = 2l;
+									state = State.STRING_LENGTH;
 									break;
 								case 0xDB:
 									// str 32
-									//TODO
+									accumulator = 0l;
+									remainingLength = 4l;
+									state = State.STRING_LENGTH;
 									break;
 								case 0xDC:
 									// array 16
-									//TODO
+									accumulator = 0l;
+									remainingLength = 2l;
+									state = State.ARRAY_LENGTH;
 									break;
 								case 0xDD:
 									// array 32
-									//TODO
+									accumulator = 0l;
+									remainingLength = 4l;
+									state = State.ARRAY_LENGTH;
 									break;
 								case 0xDE:
 									// map 16
-									//TODO
+									accumulator = 0l;
+									remainingLength = 2l;
+									state = State.MAP_LENGTH;
 									break;
 								case 0xDF:
 									// map 32
-									//TODO
+									accumulator = 0l;
+									remainingLength = 4l;
+									state = State.MAP_LENGTH;
 									break;
 								default:
 									throw new Doom("Bit twiddling error");
@@ -239,6 +371,8 @@ public class MsgPackDecoder {
 						case 0xE0:
 							// 111xxxxx => negative fixint
 							sink.integer((long)b, true);
+							if(pushDown(nonBlocking, true))
+								break perByte;
 							break;
 						default:
 							throw new Doom("Bit twiddling error");
@@ -253,6 +387,8 @@ public class MsgPackDecoder {
 					if(--remainingLength == 0l) {
 						state = State.CLEAN;
 						sink.integer(accumulator, true);
+						if(pushDown(nonBlocking, true))
+							break perByte;
 					}
 					break;
 				case UINT:
@@ -260,6 +396,52 @@ public class MsgPackDecoder {
 					if(--remainingLength == 0l) {
 						state = State.CLEAN;
 						sink.integer(accumulator, false);
+						if(pushDown(nonBlocking, true))
+							break perByte;
+					}
+					break;
+				case STRING_LENGTH:
+					accumulator = (accumulator << 8) | ((long)b & 0xFFl);
+					if(--remainingLength == 0l) {
+						remainingLength = accumulator;
+						if(enterString(accumulator)) {
+							if(nonBlocking)
+								break perByte;
+						}
+						else {
+							state = State.CLEAN;
+							if(pushDown(nonBlocking, true))
+								break perByte;
+						}
+					}
+					break;
+				case BINARY_LENGTH:
+					accumulator = (accumulator << 8) | ((long)b & 0xFFl);
+					if(--remainingLength == 0l) {
+						remainingLength = accumulator;
+						if(enterBinary(accumulator)) {
+							if(nonBlocking)
+								break perByte;
+						}
+						else {
+							state = State.CLEAN;
+							if(pushDown(nonBlocking, true))
+								break perByte;
+						}
+					}
+					break;
+				case ARRAY_LENGTH:
+					accumulator = (accumulator << 8) | ((long)b & 0xFFl);
+					if(--remainingLength == 0l) {
+						if(enterArray(accumulator) ? nonBlocking : pushDown(nonBlocking, true))
+							break perByte;
+					}
+					break;
+				case MAP_LENGTH:
+					accumulator = (accumulator << 8) | ((long)b & 0xFFl);
+					if(--remainingLength == 0l) {
+						if(enterMap(accumulator) ? nonBlocking : pushDown(nonBlocking, true))
+							break perByte;
 					}
 					break;
 				case FLOAT:
@@ -267,6 +449,8 @@ public class MsgPackDecoder {
 					if(--remainingLength == 0l) {
 						state = State.CLEAN;
 						sink.fraction(Float.intBitsToFloat((int)accumulator));
+						if(pushDown(nonBlocking, true))
+							break perByte;
 					}
 					break;
 				case DOUBLE:
@@ -274,12 +458,40 @@ public class MsgPackDecoder {
 					if(--remainingLength == 0l) {
 						state = State.CLEAN;
 						sink.fraction(Double.longBitsToDouble(accumulator));
+						if(pushDown(nonBlocking, true))
+							break perByte;
 					}
+					break;
+				case STRING:
+				case BINARY:
+					chunk = end - i;
+					if((long)chunk >= remainingLength) {
+						chunk = (int)remainingLength;
+						if(state == State.STRING)
+							written = sink.endString(bytes, i, chunk);
+						else
+							written = sink.endBinary(bytes, i, chunk);
+					}
+					else {
+						if(state == State.STRING)
+							written = sink.continueString(bytes, i, chunk);
+						else
+							written = sink.continueBinary(bytes, i, chunk);
+					}
+					if(written > chunk)
+						throw new TooManyElementsWrittenException(chunk, written);
+					remainingLength -= (long)written;
+					i += chunk - 1;
+					if(remainingLength == 0l)
+						state = State.CLEAN;
+					if((remainingLength == 0l ? pushDown(nonBlocking, true) : nonBlocking) || i >= end)
+						break perByte;
 					break;
 				default:
 					throw new Doom("Unrecognized state: " + state.name());
 			}
 		}
+		return (i >= end ? i : i + 1) - offset;
 	}
 
 }
