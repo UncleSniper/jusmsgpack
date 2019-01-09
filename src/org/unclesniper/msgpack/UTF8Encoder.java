@@ -229,7 +229,15 @@ public class UTF8Encoder {
 			throws StringEncodingException {
 		outcount = 0;
 		int consumed = 0;
-		while((replacement != null || pending > 0 || consumed < insize) && outcount < outsize) {
+		/* Input:
+		 *   - input
+		 *   - (highSurrogate)
+		 * Output:
+		 *   - replacement
+		 *   - partial/pending
+		 *   - transformed input
+		 */
+		while((replacement != null || pending > 0 || consumed < insize) && (output == null || outcount < outsize)) {
 			if(replacement != null) {
 				int count = replacement.drain(output, outoff + outcount, outsize - outcount);
 				if(count <= 0)

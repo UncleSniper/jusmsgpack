@@ -14,6 +14,10 @@ public class UTF8Decoder {
 		int unrepresentableCharacter(int character, char[] output, int outoff, int outsize,
 				RecoverUnrepresentableCharacter recover) throws StringEncodingException;
 
+		void incompleteSequence(int accumulator, int processedCount, int sequenceLength,
+				char[] output, int outoff, int outsize, RecoverIncompleteSequence recover)
+				throws StringEncodingException;
+
 	}
 
 	public static class ThrowingErrorHandler implements ErrorHandler {
@@ -24,18 +28,24 @@ public class UTF8Decoder {
 
 		public boolean illegalInitiatorByte(byte initiator, char[] output, int outoff, int outsize,
 				RecoverIllegalInitiatorByte recover) throws StringEncodingException {
-			throw new IllegalUTF8SequenceByte(initiator, true);
+			throw new IllegalUTF8SequenceByteException(initiator, true);
 		}
 
 		public boolean illegalContinuationByte(int accumulator, int processedCount, int sequenceLength,
 				byte continuation, char[] output, int outoff, int outsize,
 				RecoverIllegalContinuationByte recover) throws StringEncodingException {
-			throw new IllegalUTF8SequenceByte(continuation, false);
+			throw new IllegalUTF8SequenceByteException(continuation, false);
 		}
 
 		public int unrepresentableCharacter(int character, char[] output, int outoff, int outsize,
 				RecoverUnrepresentableCharacter recover) throws StringEncodingException {
 			throw new UnrepresentableCharacterException(character);
+		}
+
+		public void incompleteSequence(int accumulator, int processedCount, int sequenceLength,
+				char[] output, int outoff, int outsize, RecoverIncompleteSequence recover)
+				throws StringEncodingException {
+			throw new IncompleteUTF8SequenceException(sequenceLength - processedCount, sequenceLength);
 		}
 
 	}
@@ -98,6 +108,9 @@ public class UTF8Decoder {
 			return (int)replacement;
 		}
 
+		public void incompleteSequence(int accumulator, int processedCount, int sequenceLength,
+				char[] output, int outoff, int outsize, RecoverIncompleteSequence recover) {}
+
 	}
 
 	public static class SquashingErrorHandler implements ErrorHandler {
@@ -134,6 +147,9 @@ public class UTF8Decoder {
 			return -1;
 		}
 
+		public void incompleteSequence(int accumulator, int processedCount, int sequenceLength,
+				char[] output, int outoff, int outsize, RecoverIncompleteSequence recover) {}
+
 	}
 
 	public interface Recover {
@@ -150,8 +166,10 @@ public class UTF8Decoder {
 
 	public interface RecoverUnrepresentableCharacter extends Recover {}
 
+	public interface RecoverIncompleteSequence extends Recover {}
+
 	private class RecoverImpl implements RecoverIllegalInitiatorByte, RecoverIllegalContinuationByte,
-			RecoverUnrepresentableCharacter {
+			RecoverUnrepresentableCharacter, RecoverIncompleteSequence {
 
 		int outsize;
 
@@ -222,19 +240,33 @@ public class UTF8Decoder {
 	}
 
 	public boolean isClean() {
-		//TODO
-		return false;
+		return lowSurrogate == 0 && replacement == null;
 	}
 
 	public void copyStateInto(UTF8Decoder other) {
-		//TODO
+		other.pending = pending;
+		other.partial = partial;
+		other.partialSize = partialSize;
+		other.errorHandler = errorHandler;
+		other.replacement = replacement == null ? null : replacement.copy();
+		other.skipContinuationBytes = skipContinuationBytes;
+		other.lowSurrogate = lowSurrogate;
 	}
 
 	public int decode(byte[] input, int inoff, int insize, char[] output, int outoff, int outsize)
 			throws StringEncodingException {
 		outcount = 0;
 		int consumed = 0;
-		while((replacement != null || consumed < insize) && (output == null || outcount < outsize)) {
+		/* Input:
+		 *   - input
+		 *   - (partial/pending)
+		 * Output:
+		 *   - lowSurrogate
+		 *   - replacement
+		 *   - transformed input
+		 */
+		while((lowSurrogate != 0 || replacement != null || consumed < insize)
+				&& (output == null || outcount < outsize)) {
 			if(lowSurrogate != 0) {
 				if(output != null)
 					output[outoff + outcount] = (char)lowSurrogate;
@@ -328,6 +360,42 @@ public class UTF8Decoder {
 	}
 
 	public int getOutCount() {
+		return outcount;
+	}
+
+	public int drain(char[] output, int outoff, int outsize) throws StringEncodingException {
+		outcount = 0;
+		if(output != null && outsize <= 0)
+			return 0;
+		while((pending > 0 || lowSurrogate != 0 || replacement != null) && (output == null || outcount < outsize)) {
+			if(pending > 0) {
+				int sequenceLength = partialSize + pending;
+				pending = 0;
+				if(recover == null)
+					recover = new RecoverImpl();
+				recover.outsize = outsize;
+				(errorHandler == null ? UTF8Decoder.DEFAULT_ERROR_HANDLER : errorHandler)
+						.incompleteSequence(partial, partialSize, sequenceLength,
+								output, outoff + outcount, outsize - outcount, recover);
+			}
+			else if(lowSurrogate != 0) {
+				if(output != null)
+					output[outoff + outcount] = (char)lowSurrogate;
+				++outcount;
+				lowSurrogate = 0;
+			}
+			else {
+				int count = replacement.drain(output, outoff + outcount, outsize - outcount);
+				if(count <= 0)
+					replacement = null;
+				else if(count > outsize - outcount)
+					throw new IllegalStateException("Replacement output reports to have written " + count
+							+ " characters, but there were only " + (outsize - outcount)
+							+ " elements of space left");
+				else
+					outcount += count;
+			}
+		}
 		return outcount;
 	}
 
