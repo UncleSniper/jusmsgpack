@@ -123,4 +123,39 @@ public abstract class AbstractProxyMsgPackSink implements MsgPackSink {
 		slave.endMap();
 	}
 
+	@Override
+	public void emptyExtension(byte type) throws IOException {
+		slave.emptyExtension(type);
+	}
+
+	@Override
+	public int extension(byte type, byte[] bytes, int offset, int count) throws IOException {
+		return slave.extension(type, bytes, offset, count);
+	}
+
+	@Override
+	public void beginExtension(byte type, int totalSize) throws IOException {
+		slave.beginExtension(type, totalSize);
+	}
+
+	@Override
+	public int beginExtension(byte type, int totalSize, byte[] bytes, int offset, int count) throws IOException {
+		return slave.beginExtension(type, totalSize, bytes, offset, count);
+	}
+
+	@Override
+	public int continueExtension(byte[] bytes, int offset, int count) throws IOException {
+		return slave.continueExtension(bytes, offset, count);
+	}
+
+	@Override
+	public void endExtension() throws IOException {
+		slave.endExtension();
+	}
+
+	@Override
+	public int endExtension(byte[] bytes, int offset, int count) throws IOException {
+		return slave.endExtension(bytes, offset, count);
+	}
+
 }

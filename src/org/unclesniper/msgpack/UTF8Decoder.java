@@ -243,6 +243,10 @@ public class UTF8Decoder {
 		return lowSurrogate == 0 && replacement == null;
 	}
 
+	public boolean isDrained() {
+		return pending == 0 && lowSurrogate == 0 && replacement == null;
+	}
+
 	public void copyStateInto(UTF8Decoder other) {
 		other.pending = pending;
 		other.partial = partial;

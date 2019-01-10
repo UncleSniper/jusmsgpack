@@ -9,7 +9,8 @@ public class MsgPackEncoder implements MsgPackByteSink {
 		STRING,
 		BINARY,
 		ARRAY,
-		MAP
+		MAP,
+		EXTENSION
 	}
 
 	private static class Level {
@@ -85,6 +86,7 @@ public class MsgPackEncoder implements MsgPackByteSink {
 		switch(stack.structure) {
 			case STRING:
 			case BINARY:
+			case EXTENSION:
 				throw new IllegalStateException("Out-of-sequence event received: Still within "
 						+ stack.structure.name().toLowerCase() + " structure");
 		}
@@ -98,6 +100,11 @@ public class MsgPackEncoder implements MsgPackByteSink {
 	private void requireBinary() {
 		if(stack == null || stack.structure != Structure.BINARY)
 			throw new IllegalStateException("Out-of-sequence event received: Not within binary structure");
+	}
+
+	private void requireExtension() {
+		if(stack == null || stack.structure != Structure.EXTENSION)
+			throw new IllegalStateException("Out-of-sequence event received: Not within extension structure");
 	}
 
 	private void advanceStructure() throws SequenceSizeMismatchException {
@@ -221,6 +228,104 @@ public class MsgPackEncoder implements MsgPackByteSink {
 		advanceStructure();
 	}
 
+	private int byteseq(int hsize, Structure structure, byte[] bytes, int offset, int count) throws IOException {
+		if(count == 0) {
+			writer.writeChunk(buffer, 0, hsize);
+			advanceStructure();
+			return 0;
+		}
+		if(writer.isBlockingWriter()) {
+			writer.writeChunk(buffer, 0, hsize);
+			writer.writeChunk(bytes, offset, count);
+			advanceStructure();
+			return count;
+		}
+		int all = hsize + count;
+		if(all >= hsize) {
+			boolean full;
+			int chunk;
+			if(all > buffer.length) {
+				all = buffer.length;
+				chunk = all - hsize;
+				full = false;
+			}
+			else {
+				chunk = count;
+				full = true;
+			}
+			int end = offset + chunk;
+			for(; offset < end; ++offset)
+				buffer[hsize + offset] = bytes[offset];
+			writer.writeChunk(buffer, 0, all);
+			if(full)
+				advanceStructure();
+			else
+				stack = new Level(stack, structure, (long)count, (long)chunk);
+			return chunk;
+		}
+		writer.writeChunk(buffer, 0, hsize);
+		stack = new Level(stack, structure, (long)count, 0l);
+		return 0;
+	}
+
+	private int beginByteseq(int hsize, Structure structure, long tsize, byte[] bytes, int offset, int count)
+			throws IOException {
+		int written;
+		if(writer.isBlockingWriter()) {
+			writer.writeChunk(buffer, 0, hsize);
+			writer.writeChunk(bytes, offset, count);
+			written = count;
+		}
+		else {
+			int all = hsize + count;
+			if(all >= hsize) {
+				if(all > buffer.length) {
+					all = buffer.length;
+					count = all - hsize;
+				}
+				int end = offset + count;
+				for(; offset < end; ++offset)
+					buffer[hsize + offset] = bytes[offset];
+				writer.writeChunk(buffer, 0, all);
+				written = count;
+			}
+			else {
+				writer.writeChunk(buffer, 0, hsize);
+				written = 0;
+			}
+		}
+		stack = new Level(stack, structure, tsize, (long)written);
+		return written;
+	}
+
+	private int continueByteseq(byte[] bytes, int offset, int count) throws IOException {
+		if(count < 0)
+			count = 0;
+		if(count == 0)
+			return 0;
+		stack.receivedSize += (long)count;
+		if(stack.receivedSize > stack.announcedSize)
+			throw new SequenceSizeMismatchException(stack.announcedSize, stack.receivedSize, true);
+		writer.writeChunk(bytes, offset, count);
+		return count;
+	}
+
+	private int endByteseq(byte[] bytes, int offset, int count) throws IOException {
+		if(count < 0)
+			count = 0;
+		if(count > 0) {
+			stack.receivedSize += (long)count;
+			if(stack.receivedSize > stack.announcedSize)
+				throw new SequenceSizeMismatchException(stack.announcedSize, stack.receivedSize, true);
+			writer.writeChunk(bytes, offset, count);
+		}
+		if(stack.receivedSize < stack.announcedSize)
+			throw new SequenceSizeMismatchException(stack.announcedSize, stack.receivedSize, false);
+		stack = stack.parent;
+		advanceStructure();
+		return count;
+	}
+
 	@Override
 	public void emptyString() throws IOException {
 		requireClean();
@@ -255,44 +360,7 @@ public class MsgPackEncoder implements MsgPackByteSink {
 		requireClean();
 		if(count < 0)
 			count = 0;
-		int hsize = stringHeader(count);
-		if(count == 0) {
-			writer.writeChunk(buffer, 0, 1);
-			advanceStructure();
-			return 0;
-		}
-		if(writer.isBlockingWriter()) {
-			writer.writeChunk(buffer, 0, hsize);
-			writer.writeChunk(bytes, offset, count);
-			advanceStructure();
-			return count;
-		}
-		int all = hsize + count;
-		if(all >= hsize) {
-			boolean full;
-			int chunk;
-			if(all > buffer.length) {
-				all = buffer.length;
-				chunk = all - hsize;
-				full = false;
-			}
-			else {
-				chunk = count;
-				full = true;
-			}
-			int end = offset + chunk;
-			for(; offset < end; ++offset)
-				buffer[hsize + offset] = bytes[offset];
-			writer.writeChunk(buffer, 0, all);
-			if(full)
-				advanceStructure();
-			else
-				stack = new Level(stack, Structure.STRING, (long)count, (long)chunk);
-			return chunk;
-		}
-		writer.writeChunk(buffer, 0, hsize);
-		stack = new Level(stack, Structure.STRING, (long)count, 0l);
-		return 0;
+		return byteseq(stringHeader(count), Structure.STRING, bytes, offset, count);
 	}
 
 	@Override
@@ -310,47 +378,13 @@ public class MsgPackEncoder implements MsgPackByteSink {
 		long tsize = (long)totalSize & 0xFFFFFFFFl;
 		if((long)count > tsize)
 			throw new SequenceSizeMismatchException(tsize, (long)count, true);
-		int hsize = stringHeader(totalSize);
-		int written;
-		if(writer.isBlockingWriter()) {
-			writer.writeChunk(buffer, 0, hsize);
-			writer.writeChunk(bytes, offset, count);
-			written = count;
-		}
-		else {
-			int all = hsize + count;
-			if(all >= hsize) {
-				if(all > buffer.length) {
-					all = buffer.length;
-					count = all - hsize;
-				}
-				int end = offset + count;
-				for(; offset < end; ++offset)
-					buffer[hsize + offset] = bytes[offset];
-				writer.writeChunk(buffer, 0, all);
-				written = count;
-			}
-			else {
-				writer.writeChunk(buffer, 0, hsize);
-				written = 0;
-			}
-		}
-		stack = new Level(stack, Structure.STRING, tsize, (long)written);
-		return written;
+		return beginByteseq(stringHeader(totalSize), Structure.STRING, tsize, bytes, offset, count);
 	}
 
 	@Override
 	public int continueString(byte[] bytes, int offset, int count) throws IOException {
 		requireString();
-		if(count < 0)
-			count = 0;
-		if(count == 0)
-			return 0;
-		stack.receivedSize += (long)count;
-		if(stack.receivedSize > stack.announcedSize)
-			throw new SequenceSizeMismatchException(stack.announcedSize, stack.receivedSize, true);
-		writer.writeChunk(bytes, offset, count);
-		return count;
+		return continueByteseq(bytes, offset, count);
 	}
 
 	@Override
@@ -365,19 +399,7 @@ public class MsgPackEncoder implements MsgPackByteSink {
 	@Override
 	public int endString(byte[] bytes, int offset, int count) throws IOException {
 		requireString();
-		if(count < 0)
-			count = 0;
-		if(count > 0) {
-			stack.receivedSize += (long)count;
-			if(stack.receivedSize > stack.announcedSize)
-				throw new SequenceSizeMismatchException(stack.announcedSize, stack.receivedSize, true);
-			writer.writeChunk(bytes, offset, count);
-		}
-		if(stack.receivedSize < stack.announcedSize)
-			throw new SequenceSizeMismatchException(stack.announcedSize, stack.receivedSize, false);
-		stack = stack.parent;
-		advanceStructure();
-		return count;
+		return endByteseq(bytes, offset, count);
 	}
 
 	@Override
@@ -411,44 +433,7 @@ public class MsgPackEncoder implements MsgPackByteSink {
 		requireClean();
 		if(count < 0)
 			count = 0;
-		int hsize = binaryHeader(count);
-		if(count == 0) {
-			writer.writeChunk(buffer, 0, 2);
-			advanceStructure();
-			return 0;
-		}
-		if(writer.isBlockingWriter()) {
-			writer.writeChunk(buffer, 0, hsize);
-			writer.writeChunk(bytes, offset, count);
-			advanceStructure();
-			return count;
-		}
-		int all = hsize + count;
-		if(all >= hsize) {
-			boolean full;
-			int chunk;
-			if(all > buffer.length) {
-				all = buffer.length;
-				chunk = all - hsize;
-				full = false;
-			}
-			else {
-				chunk = count;
-				full = true;
-			}
-			int end = offset + chunk;
-			for(; offset < end; ++offset)
-				buffer[hsize + offset] = bytes[offset];
-			writer.writeChunk(buffer, 0, all);
-			if(full)
-				advanceStructure();
-			else
-				stack = new Level(stack, Structure.BINARY, (long)count, (long)chunk);
-			return count;
-		}
-		writer.writeChunk(buffer, 0, hsize);
-		stack = new Level(stack, Structure.BINARY, (long)count, 0l);
-		return 0;
+		return byteseq(binaryHeader(count), Structure.BINARY, bytes, offset, count);
 	}
 
 	@Override
@@ -466,47 +451,13 @@ public class MsgPackEncoder implements MsgPackByteSink {
 		long tsize = (long)totalSize & 0xFFFFFFFFl;
 		if((long)count > tsize)
 			throw new SequenceSizeMismatchException(tsize, (long)count, true);
-		int hsize = binaryHeader(totalSize);
-		int written;
-		if(writer.isBlockingWriter()) {
-			writer.writeChunk(buffer, 0, hsize);
-			writer.writeChunk(bytes, offset, count);
-			written = count;
-		}
-		else {
-			int all = hsize + count;
-			if(all >= hsize) {
-				if(all > buffer.length) {
-					all = buffer.length;
-					count = all - hsize;
-				}
-				int end = offset + count;
-				for(; offset < end; ++offset)
-					buffer[hsize + offset] = bytes[offset];
-				writer.writeChunk(buffer, 0, all);
-				written = count;
-			}
-			else {
-				writer.writeChunk(buffer, 0, hsize);
-				written = 0;
-			}
-		}
-		stack = new Level(stack, Structure.BINARY, tsize, (long)written);
-		return written;
+		return beginByteseq(binaryHeader(totalSize), Structure.BINARY, tsize, bytes, offset, count);
 	}
 
 	@Override
 	public int continueBinary(byte[] bytes, int offset, int count) throws IOException {
 		requireBinary();
-		if(count < 0)
-			count = 0;
-		if(count == 0)
-			return 0;
-		stack.receivedSize += (long)count;
-		if(stack.receivedSize > stack.announcedSize)
-			throw new SequenceSizeMismatchException(stack.announcedSize, stack.receivedSize, true);
-		writer.writeChunk(bytes, offset, count);
-		return count;
+		return continueByteseq(bytes, offset, count);
 	}
 
 	@Override
@@ -521,19 +472,7 @@ public class MsgPackEncoder implements MsgPackByteSink {
 	@Override
 	public int endBinary(byte[] bytes, int offset, int count) throws IOException {
 		requireBinary();
-		if(count < 0)
-			count = 0;
-		if(count > 0) {
-			stack.receivedSize += (long)count;
-			if(stack.receivedSize > stack.announcedSize)
-				throw new SequenceSizeMismatchException(stack.announcedSize, stack.receivedSize, true);
-			writer.writeChunk(bytes, offset, count);
-		}
-		if(stack.receivedSize < stack.announcedSize)
-			throw new SequenceSizeMismatchException(stack.announcedSize, stack.receivedSize, false);
-		stack = stack.parent;
-		advanceStructure();
-		return count;
+		return endByteseq(bytes, offset, count);
 	}
 
 	@Override
@@ -612,6 +551,105 @@ public class MsgPackEncoder implements MsgPackByteSink {
 			throw new SequenceSizeMismatchException(stack.announcedSize, stack.receivedSize, false);
 		stack = stack.parent;
 		advanceStructure();
+	}
+
+	@Override
+	public void emptyExtension(byte type) throws IOException {
+		requireClean();
+		buffer[0] = (byte)0xC7;
+		buffer[1] = (byte)0;
+		buffer[2] = type;
+		writer.writeChunk(buffer, 0, 3);
+		advanceStructure();
+	}
+
+	private int extensionHeader(byte type, int totalSize) {
+		switch(totalSize) {
+			case 1:
+				buffer[0] = (byte)0xD4;
+				break;
+			case 2:
+				buffer[0] = (byte)0xD5;
+				break;
+			case 4:
+				buffer[0] = (byte)0xD6;
+				break;
+			case 8:
+				buffer[0] = (byte)0xD7;
+				break;
+			case 16:
+				buffer[0] = (byte)0xD8;
+				break;
+			default:
+				{
+					long tsize = (long)totalSize & 0xFFFFFFFFl;
+					if(tsize < 0x100l) {
+						buffer[0] = (byte)0xC7;
+						buffer[1] = (byte)totalSize;
+						buffer[2] = type;
+						return 3;
+					}
+					if(tsize < 0x10000l) {
+						buffer[0] = (byte)0xC8;
+						putShort(1, (short)totalSize);
+						buffer[3] = type;
+						return 4;
+					}
+					buffer[0] = (byte)0xC9;
+					putInt(1, totalSize);
+					buffer[5] = type;
+					return 6;
+				}
+		}
+		buffer[1] = type;
+		return 2;
+	}
+
+	@Override
+	public int extension(byte type, byte[] bytes, int offset, int count) throws IOException {
+		requireClean();
+		if(count < 0)
+			count = 0;
+		return byteseq(extensionHeader(type, count), Structure.EXTENSION, bytes, offset, count);
+	}
+
+	@Override
+	public void beginExtension(byte type, int totalSize) throws IOException {
+		requireClean();
+		writer.writeChunk(buffer, 0, extensionHeader(type, totalSize));
+		stack = new Level(stack, Structure.EXTENSION, (long)totalSize & 0xFFFFFFFFl, 0l);
+	}
+
+	@Override
+	public int beginExtension(byte type, int totalSize, byte[] bytes, int offset, int count) throws IOException {
+		requireClean();
+		if(count < 0)
+			count = 0;
+		long tsize = (long)totalSize & 0xFFFFFFFFl;
+		if((long)count > tsize)
+			throw new SequenceSizeMismatchException(tsize, (long)count, true);
+		return beginByteseq(extensionHeader(type, totalSize), Structure.EXTENSION, tsize, bytes, offset, count);
+	}
+
+	@Override
+	public int continueExtension(byte[] bytes, int offset, int count) throws IOException {
+		requireExtension();
+		return continueByteseq(bytes, offset, count);
+	}
+
+	@Override
+	public void endExtension() throws IOException {
+		requireExtension();
+		if(stack.receivedSize < stack.announcedSize)
+			throw new SequenceSizeMismatchException(stack.announcedSize, stack.receivedSize, false);
+		stack = stack.parent;
+		advanceStructure();
+	}
+
+	@Override
+	public int endExtension(byte[] bytes, int offset, int count) throws IOException {
+		requireExtension();
+		return endByteseq(bytes, offset, count);
 	}
 
 }

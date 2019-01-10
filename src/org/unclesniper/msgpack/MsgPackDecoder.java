@@ -36,7 +36,10 @@ public class MsgPackDecoder {
 		BINARY,
 		BINARY_LENGTH,
 		ARRAY_LENGTH,
-		MAP_LENGTH
+		MAP_LENGTH,
+		EXTENSION,
+		EXTENSION_LENGTH,
+		EXTENSION_TYPE
 	}
 
 	private Level stack;
@@ -80,14 +83,23 @@ public class MsgPackDecoder {
 		return true;
 	}
 
-	private boolean enterBinary(long length) throws IOException {
-		if(length == 0l) {
+	private boolean enterBinary() throws IOException {
+		if(remainingLength == 0l) {
 			sink.emptyBinary();
 			return false;
 		}
-		remainingLength = length;
 		state = State.BINARY;
-		sink.beginBinary((int)length);
+		sink.beginBinary((int)remainingLength);
+		return true;
+	}
+
+	private boolean enterExtension(byte type) throws IOException {
+		if(remainingLength == 0l) {
+			sink.emptyExtension(type);
+			return false;
+		}
+		state = State.EXTENSION;
+		sink.beginExtension(type, (int)remainingLength);
 		return true;
 	}
 
@@ -232,15 +244,21 @@ public class MsgPackDecoder {
 									break;
 								case 0xC7:
 									// ext 8
-									//TODO
+									accumulator = 0l;
+									remainingLength = 1l;
+									state = State.EXTENSION_LENGTH;
 									break;
 								case 0xC8:
 									// ext 16
-									//TODO
+									accumulator = 0l;
+									remainingLength = 2l;
+									state = State.EXTENSION_LENGTH;
 									break;
 								case 0xC9:
 									// ext 32
-									//TODO
+									accumulator = 0l;
+									remainingLength = 4l;
+									state = State.EXTENSION_LENGTH;
 									break;
 								case 0xCA:
 									// float 32
@@ -304,23 +322,28 @@ public class MsgPackDecoder {
 									break;
 								case 0xD4:
 									// fixext 1
-									//TODO
+									remainingLength = 1l;
+									state = State.EXTENSION_TYPE;
 									break;
 								case 0xD5:
 									// fixext 2
-									//TODO
+									remainingLength = 2l;
+									state = State.EXTENSION_TYPE;
 									break;
 								case 0xD6:
 									// fixext 4
-									//TODO
+									remainingLength = 4l;
+									state = State.EXTENSION_TYPE;
 									break;
 								case 0xD7:
 									// fixext 8
-									//TODO
+									remainingLength = 8l;
+									state = State.EXTENSION_TYPE;
 									break;
 								case 0xD8:
 									// fixext 16
-									//TODO
+									remainingLength = 16l;
+									state = State.EXTENSION_TYPE;
 									break;
 								case 0xD9:
 									// str 8
@@ -419,7 +442,7 @@ public class MsgPackDecoder {
 					accumulator = (accumulator << 8) | ((long)b & 0xFFl);
 					if(--remainingLength == 0l) {
 						remainingLength = accumulator;
-						if(enterBinary(accumulator)) {
+						if(enterBinary()) {
 							if(nonBlocking)
 								break perByte;
 						}
@@ -428,6 +451,24 @@ public class MsgPackDecoder {
 							if(pushDown(nonBlocking, true))
 								break perByte;
 						}
+					}
+					break;
+				case EXTENSION_LENGTH:
+					accumulator = (accumulator << 8) | ((long)b & 0xFFl);
+					if(--remainingLength == 0l) {
+						remainingLength = accumulator;
+						state = State.EXTENSION_TYPE;
+					}
+					break;
+				case EXTENSION_TYPE:
+					if(enterExtension(b)) {
+						if(nonBlocking)
+							break perByte;
+					}
+					else {
+						state = State.CLEAN;
+						if(pushDown(nonBlocking, true))
+							break perByte;
 					}
 					break;
 				case ARRAY_LENGTH:

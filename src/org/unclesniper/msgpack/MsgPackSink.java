@@ -44,6 +44,20 @@ public interface MsgPackSink {
 
 	void endMap() throws IOException;
 
+	void emptyExtension(byte type) throws IOException;
+
+	int extension(byte type, byte[] bytes, int offset, int count) throws IOException;
+
+	void beginExtension(byte type, int totalSize) throws IOException;
+
+	int beginExtension(byte type, int totalSize, byte[] bytes, int offset, int count) throws IOException;
+
+	int continueExtension(byte[] bytes, int offset, int count) throws IOException;
+
+	void endExtension() throws IOException;
+
+	int endExtension(byte[] bytes, int offset, int count) throws IOException;
+
 	boolean isBlockingSink();
 
 }

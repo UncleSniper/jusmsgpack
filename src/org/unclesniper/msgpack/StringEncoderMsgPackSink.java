@@ -97,10 +97,8 @@ public class StringEncoderMsgPackSink implements MsgPackCharSink {
 					byteBuffer, bufferFill, byteBuffer.length - bufferFill);
 			bufferFill += encoder.getOutCount();
 		}
-		while(bufferFill < byteBuffer.length && !encoder.isClean()) {
-			encoder.encode(null, 0, 0, byteBuffer, bufferFill, byteBuffer.length - bufferFill);
-			bufferFill += encoder.getOutCount();
-		}
+		while(bufferFill < byteBuffer.length && !encoder.isDrained())
+			bufferFill += encoder.drain(byteBuffer, bufferFill, byteBuffer.length - bufferFill);
 		return consumed;
 	}
 
@@ -129,7 +127,7 @@ public class StringEncoderMsgPackSink implements MsgPackCharSink {
 		encoder.reset();
 		int consumed = fillBuffer(chars, offset, count);
 		bufferOffset = bufferFill;
-		if(consumed == count && encoder.isClean()) {
+		if(consumed == count && encoder.isDrained()) {
 			int written = slave.string(byteBuffer, 0, bufferFill);
 			if(written > bufferFill)
 				throw new TooManyElementsWrittenException(bufferFill, written);
@@ -150,7 +148,7 @@ public class StringEncoderMsgPackSink implements MsgPackCharSink {
 			throw new TooManyElementsWrittenException(bufferFill, written);
 		if(written < bufferFill)
 			throw new SynchronicityViolationException(bufferFill, written);
-		while(consumed < count || !encoder.isClean()) {
+		while(consumed < count || !encoder.isDrained()) {
 			bufferFill = 0;
 			consumed += fillBuffer(chars, offset + consumed, count - consumed);
 			bufferOffset = bufferFill;
@@ -175,7 +173,7 @@ public class StringEncoderMsgPackSink implements MsgPackCharSink {
 		bufferFill = 0;
 		encoder.reset();
 		int consumed = fillBuffer(chars, offset, count);
-		if(consumed == count && encoder.isClean()) {
+		if(consumed == count && encoder.isDrained()) {
 			bufferOffset = slave.string(byteBuffer, 0, bufferFill);
 			if(bufferOffset > bufferFill)
 				throw new TooManyElementsWrittenException(bufferFill, bufferOffset);
@@ -226,7 +224,7 @@ public class StringEncoderMsgPackSink implements MsgPackCharSink {
 		long tsize = (long)totalSizeInBytes & 0xFFFFFFFFl;
 		receivedSize = 0l;
 		int consumed = 0;
-		while(consumed < count || !encoder.isClean()) {
+		while(consumed < count || !encoder.isDrained()) {
 			bufferFill = 0;
 			consumed += fillBuffer(chars, offset + consumed, count - consumed);
 			if(bufferFill == 0)
@@ -261,7 +259,7 @@ public class StringEncoderMsgPackSink implements MsgPackCharSink {
 		if(bufferOffset > bufferFill)
 			throw new TooManyElementsWrittenException(bufferFill, bufferOffset);
 		announcedSize = tsize;
-		if(consumed == count && (bufferOffset < bufferFill || !encoder.isClean())) {
+		if(consumed == count && (bufferOffset < bufferFill || !encoder.isDrained())) {
 			skipChars = 1;
 			--consumed;
 		}
@@ -293,7 +291,7 @@ public class StringEncoderMsgPackSink implements MsgPackCharSink {
 		int trueCount = count - skipChars;
 		skipChars = 0;
 		int consumed = 0;
-		while(consumed < trueCount || !encoder.isClean()) {
+		while(consumed < trueCount || !encoder.isDrained()) {
 			bufferOffset = bufferFill = 0;
 			consumed += fillBuffer(chars, offset + consumed, trueCount - consumed);
 			if(bufferFill == 0)
@@ -336,7 +334,7 @@ public class StringEncoderMsgPackSink implements MsgPackCharSink {
 		bufferOffset = slave.continueString(byteBuffer, 0, bufferFill);
 		if(bufferOffset > bufferFill)
 			throw new TooManyElementsWrittenException(bufferFill, bufferOffset);
-		if(consumed == count && consumed > 0 && (bufferOffset < bufferFill || !encoder.isClean())) {
+		if(consumed == count && consumed > 0 && (bufferOffset < bufferFill || !encoder.isDrained())) {
 			skipChars = 1;
 			--consumed;
 		}
@@ -385,7 +383,7 @@ public class StringEncoderMsgPackSink implements MsgPackCharSink {
 		int trueCount = count - skipChars;
 		skipChars = 0;
 		int consumed = 0;
-		while(consumed < trueCount || !encoder.isClean()) {
+		while(consumed < trueCount || !encoder.isDrained()) {
 			bufferOffset = bufferFill = 0;
 			consumed += fillBuffer(chars, offset + consumed, trueCount - consumed);
 			if(bufferFill == 0)
@@ -446,7 +444,7 @@ public class StringEncoderMsgPackSink implements MsgPackCharSink {
 		if(bufferOffset > bufferFill)
 			throw new TooManyElementsWrittenException(bufferFill, bufferOffset);
 		if(consumed == count && consumed > 0
-				&& (consumed < count || bufferOffset < bufferFill || !encoder.isClean())) {
+				&& (consumed < count || bufferOffset < bufferFill || !encoder.isDrained())) {
 			skipChars = 1;
 			--consumed;
 		}
@@ -529,6 +527,48 @@ public class StringEncoderMsgPackSink implements MsgPackCharSink {
 	public void endMap() throws IOException {
 		requireNoString();
 		slave.endMap();
+	}
+
+	@Override
+	public void emptyExtension(byte type) throws IOException {
+		requireNoString();
+		slave.emptyExtension(type);
+	}
+
+	@Override
+	public int extension(byte type, byte[] bytes, int offset, int count) throws IOException {
+		requireNoString();
+		return slave.extension(type, bytes, offset, count);
+	}
+
+	@Override
+	public void beginExtension(byte type, int totalSize) throws IOException {
+		requireNoString();
+		slave.beginExtension(type, totalSize);
+	}
+
+	@Override
+	public int beginExtension(byte type, int totalSize, byte[] bytes, int offset, int count) throws IOException {
+		requireNoString();
+		return slave.beginExtension(type, totalSize, bytes, offset, count);
+	}
+
+	@Override
+	public int continueExtension(byte[] bytes, int offset, int count) throws IOException {
+		requireNoString();
+		return slave.continueExtension(bytes, offset, count);
+	}
+
+	@Override
+	public void endExtension() throws IOException {
+		requireNoString();
+		slave.endExtension();
+	}
+
+	@Override
+	public int endExtension(byte[] bytes, int offset, int count) throws IOException {
+		requireNoString();
+		return slave.endExtension(bytes, offset, count);
 	}
 
 }

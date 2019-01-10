@@ -10,6 +10,9 @@ public class UTF8Encoder {
 		int illegalLowSurrogate(int highSurrogate, int lowSurrogate, byte[] output, int outoff, int outsize,
 				RecoverIllegalLowSurrogate recover) throws StringEncodingException;
 
+		void incompleteSurrogatePair(int highSurrogate, byte[] output, int outoff, int outsize,
+				RecoverIncompleteSurrogatePair recover) throws StringEncodingException;
+
 	}
 
 	public static class ThrowingErrorHandler implements ErrorHandler {
@@ -26,6 +29,11 @@ public class UTF8Encoder {
 		public int illegalLowSurrogate(int highSurrogate, int lowSurrogate, byte[] output, int outoff, int outsize,
 				RecoverIllegalLowSurrogate recover) throws StringEncodingException {
 			throw new UnrepresentableCharacterException(lowSurrogate);
+		}
+
+		public void incompleteSurrogatePair(int highSurrogate, byte[] output, int outoff, int outsize,
+				RecoverIncompleteSurrogatePair recover) throws StringEncodingException {
+			throw new IncompleteSurrogatePairException(highSurrogate);
 		}
 
 	}
@@ -83,6 +91,9 @@ public class UTF8Encoder {
 			return (int)replacement;
 		}
 
+		public void incompleteSurrogatePair(int highSurrogate, byte[] output, int outoff, int outsize,
+				RecoverIncompleteSurrogatePair recover) {}
+
 	}
 
 	public static class SquashingErrorHandler implements ErrorHandler {
@@ -114,6 +125,9 @@ public class UTF8Encoder {
 			return -1;
 		}
 
+		public void incompleteSurrogatePair(int highSurrogate, byte[] output, int outoff, int outsize,
+				RecoverIncompleteSurrogatePair recover) {}
+
 	}
 
 	public interface Recover {
@@ -132,7 +146,10 @@ public class UTF8Encoder {
 
 	public interface RecoverIllegalLowSurrogate extends Recover {}
 
-	private class RecoverImpl implements RecoverIllegalHighSurrogate, RecoverIllegalLowSurrogate {
+	public interface RecoverIncompleteSurrogatePair extends Recover {}
+
+	private class RecoverImpl implements RecoverIllegalHighSurrogate, RecoverIllegalLowSurrogate,
+			RecoverIncompleteSurrogatePair {
 
 		boolean didWriteOutputBytes;
 
@@ -214,6 +231,10 @@ public class UTF8Encoder {
 
 	public boolean isClean() {
 		return replacement == null && pending == 0;
+	}
+
+	public boolean isDrained() {
+		return highSurrogate == 0 && replacement == null && pending == 0;
 	}
 
 	public void copyStateInto(UTF8Encoder other) {
@@ -369,6 +390,42 @@ public class UTF8Encoder {
 	}
 
 	public int getOutCount() {
+		return outcount;
+	}
+
+	public int drain(byte[] output, int outoff, int outsize) throws StringEncodingException {
+		outcount = 0;
+		while((highSurrogate != 0 || replacement != null || pending > 0)
+				|| (output == null || outcount < outsize)) {
+			if(replacement != null) {
+				int count = replacement.drain(output, outoff + outcount, outsize - outcount);
+				if(count <= 0)
+					replacement = null;
+				else if(count > outsize - outcount)
+					throw new IllegalStateException("Replacement output reports to have written " + count
+							+ " bytes, but there were only " + (outsize - outcount) + " bytes of space left");
+				else
+					outcount += count;
+			}
+			else if(pending > 0) {
+				if(output != null)
+					output[outoff + outcount] = (byte)((partial & 0x3F) | 0x80);
+				++outcount;
+				partial >>>= 6;
+				--pending;
+			}
+			else {
+				if(recover == null)
+					recover = new RecoverImpl();
+				else
+					recover.didWriteOutputBytes = false;
+				recover.outsize = outsize;
+				(errorHandler == null ? UTF8Encoder.DEFAULT_ERROR_HANDLER : errorHandler)
+						.incompleteSurrogatePair(highSurrogate,
+								output, outoff + outcount, outsize - outcount, recover);
+				highSurrogate = 0;
+			}
+		}
 		return outcount;
 	}
 
